@@ -701,6 +701,13 @@ class TestCopyForForward(CustomTestCase):
 class TestFromScheduleBatch(CustomTestCase):
     def setUp(self):
         super().setUp()
+        self._trace_req_pool = SimpleNamespace(
+            device=DEVICE,
+            max_context_len=VOCAB_SIZE,
+            req_generation=torch.zeros(16, dtype=torch.long),
+        )
+        self._next_trace_slot = 1
+        self._trace_batches = []
         # from_schedule_batch reads these two flags from the exec bag; give
         # each test a mutable stand-in so it does not depend on a published
         # (or leaked) process context.
@@ -714,6 +721,14 @@ class TestFromScheduleBatch(CustomTestCase):
         )
         exec_patch.start()
         self.addCleanup(exec_patch.stop)
+
+    def _make_trace_info(self, reqs):
+        batch = MagicMock(
+            reqs=reqs, device=DEVICE, req_to_token_pool=self._trace_req_pool
+        )
+        # The penalizer keeps only a weak reference to its owning batch.
+        self._trace_batches.append(batch)
+        return SamplingBatchInfo.from_schedule_batch(batch, VOCAB_SIZE)
 
     def _make_req(
         self,
@@ -738,12 +753,17 @@ class TestFromScheduleBatch(CustomTestCase):
         req.sampling_params.min_p = min_p
         req.sampling_params.frequency_penalty = freq
         req.sampling_params.presence_penalty = presence
+        req.sampling_params.repetition_penalty = 1.0
         req.sampling_params.min_new_tokens = min_tokens
         req.sampling_params.logit_bias = logit_bias
         req.sampling_params.sampling_seed = seed
         req.sampling_params.stop_token_ids = stop_ids
         req.sampling_params.custom_params = None
         req.sampling_params.trace_decode_token_ids = trace
+        req.sampling_params.max_new_tokens = None
+        if trace is not None:
+            req.kv.req_pool_idx = self._next_trace_slot
+            self._next_trace_slot += 1
         req.custom_logit_processor = None
         req.origin_input_ids = prompt_ids if prompt_ids is not None else [1, 2]
         req.output_ids = []
@@ -1000,78 +1020,88 @@ class TestFromScheduleBatch(CustomTestCase):
 
     def test_trace_replay_basic(self):
         req = self._make_req(trace=[7, 8], prompt_ids=[1, 2, 3])
-        batch = MagicMock(reqs=[req], device=DEVICE)
-
-        info = SamplingBatchInfo.from_schedule_batch(batch, VOCAB_SIZE)
+        info = self._make_trace_info([req])
         sampled = torch.tensor([0])
         first = apply_trace_decode_tokens(sampled, info)
         info.advance_trace_decode_steps()
         second = apply_trace_decode_tokens(sampled, info)
 
-        self.assertTrue(torch.equal(first, torch.tensor([7])))
-        self.assertTrue(torch.equal(second, torch.tensor([8])))
+        self.assertEqual(first.tolist(), [7])
+        self.assertEqual(second.tolist(), [8])
 
     def test_trace_replay_step_starts_after_existing_output(self):
         req = self._make_req(trace=[7, 8], prompt_ids=[1, 2, 3])
         req.output_ids = [99]
-        batch = MagicMock(reqs=[req], device=DEVICE)
+        info = self._make_trace_info([req])
+        self.assertEqual(
+            apply_trace_decode_tokens(torch.tensor([0]), info).tolist(), [8]
+        )
 
-        info = SamplingBatchInfo.from_schedule_batch(batch, VOCAB_SIZE)
-        replayed = apply_trace_decode_tokens(torch.tensor([0]), info)
-
-        self.assertTrue(torch.equal(replayed, torch.tensor([8])))
-
-    def test_trace_payload_tracks_live_requests_and_respects_generation_cap(self):
+    def test_trace_batch_changes_reuse_resident_request_slots(self):
         long_req = self._make_req(trace=[7, 8, 9, 10])
         long_req.sampling_params.max_new_tokens = 2
         short_req = self._make_req(trace=[13])
+        info = self._make_trace_info([long_req])
+        right = self._make_trace_info([short_req, self._make_req()])
+        self.assertIsNone(info.trace_replay.pool.tokens)
 
-        def make_info(reqs):
-            return SamplingBatchInfo.from_schedule_batch(
-                MagicMock(reqs=reqs, device=DEVICE), VOCAB_SIZE
-            )
-
-        info = make_info([long_req, short_req])
+        self.assertEqual(
+            apply_trace_decode_tokens(torch.tensor([30]), info).tolist(), [7]
+        )
+        self.assertEqual(
+            apply_trace_decode_tokens(torch.tensor([30, 31]), right).tolist(), [13, 31]
+        )
         snapshot = info.trace_replay
-        self.assertEqual(snapshot.tokens.tolist(), [7, 8, 13])
-        info.merge_batch(make_info([self._make_req()]))
-        self.assertIs(info.trace_replay.tokens, snapshot.tokens)
+        table = snapshot.pool.tokens
+        revision = snapshot.pool.revision
 
         info.advance_trace_decode_steps()
+        info.merge_batch(right)
+        self.assertEqual(
+            apply_trace_decode_tokens(torch.tensor([30, 31, 32]), info).tolist(),
+            [8, 13, 32],
+        )
         info.filter_batch([0, 2], torch.tensor([0, 2]))
-        self.assertEqual(info.trace_replay.tokens.tolist(), [7, 8])
         self.assertEqual(
             apply_trace_decode_tokens(torch.tensor([30, 31]), info).tolist(), [8, 31]
         )
-        self.assertEqual(snapshot.steps.tolist(), [0, 0])
-        self.assertEqual(snapshot.tokens.tolist(), [7, 8, 13])
+        self.assertIs(info.trace_replay.pool.tokens, table)
+        self.assertEqual(info.trace_replay.pool.revision, revision)
+        self.assertEqual(snapshot.steps.tolist(), [0])
+        self.assertEqual(snapshot.lengths.tolist(), [2])
 
+        info.advance_trace_decode_steps()
+        self.assertEqual(
+            apply_trace_decode_tokens(torch.tensor([30, 31]), info).tolist(), [30, 31]
+        )
         info.filter_batch([1], torch.tensor([1]))
         self.assertIsNone(info.trace_replay)
+
+    def test_trace_slot_reuse_preserves_delayed_forward_generation(self):
+        old_req = self._make_req(trace=[7, 8])
+        slot = old_req.kv.req_pool_idx
+        old = self._make_trace_info([old_req])
         self.assertEqual(
-            apply_trace_decode_tokens(torch.tensor([31]), info).tolist(), [31]
+            apply_trace_decode_tokens(torch.tensor([30]), old).tolist(), [7]
         )
 
-    def test_trace_merge_preserves_offsets_for_independent_payloads(self):
-        left = SamplingBatchInfo.from_schedule_batch(
-            MagicMock(
-                reqs=[self._make_req(), self._make_req(trace=[4, 5])], device=DEVICE
-            ),
-            VOCAB_SIZE,
-        )
-        right = SamplingBatchInfo.from_schedule_batch(
-            MagicMock(
-                reqs=[self._make_req(trace=[7]), self._make_req()], device=DEVICE
-            ),
-            VOCAB_SIZE,
-        )
-        left.advance_trace_decode_steps()
-        left.merge_batch(right)
+        self._trace_req_pool.req_generation[slot] += 1
+        ordinary = self._make_req()
+        ordinary.kv.req_pool_idx = slot
+        self.assertIsNone(self._make_trace_info([ordinary]).trace_replay)
 
-        self.assertEqual(
-            apply_trace_decode_tokens(torch.tensor([24, 25, 26, 27]), left).tolist(),
-            [24, 5, 7, 27],
-        )
+        self._trace_req_pool.req_generation[slot] += 1
+        new_req = self._make_req(trace=[12, 13, 14, 15, 16])
+        new_req.kv.req_pool_idx = slot
+        new_req.output_ids = [12, 13, 14, 15]
+        new = self._make_trace_info([new_req])
+
+        # A deferred sampling call from the old generation must use its own
+        # tokens even if the replacement used the same slot first.
+        sampled = torch.tensor([30])
+        self.assertEqual(apply_trace_decode_tokens(sampled, new).tolist(), [16])
+        self.assertEqual(apply_trace_decode_tokens(sampled, old).tolist(), [7])
+        self.assertEqual(apply_trace_decode_tokens(sampled, new).tolist(), [16])
 
 
 if __name__ == "__main__":

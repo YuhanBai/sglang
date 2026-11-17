@@ -878,8 +878,8 @@ def eagle_sample(
     trace_with_greedy_rows = trace is not None and (
         trace.rows.numel() == bs
         or all(
-            length or req.sampling_params.top_k <= 1
-            for (_, length), req in zip(trace.spans, batch.reqs, strict=True)
+            slot is not None or req.sampling_params.top_k <= 1
+            for slot, req in zip(trace.slots, batch.reqs, strict=True)
         )
     )
     greedy = trace_with_greedy_rows or _verify_uses_greedy(

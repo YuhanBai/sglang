@@ -545,17 +545,23 @@ class TestPostVerifyGraphsMatchEager(CustomTestCase):
     def test_trace_verify_follows_matching_branch_and_caps_commit(self):
         device = "cuda"
 
-        def req(trace):
+        def req(slot, trace):
             return SimpleNamespace(
                 sampling_params=SimpleNamespace(
                     trace_decode_token_ids=trace, max_new_tokens=None
                 ),
+                kv=SimpleNamespace(req_pool_idx=slot),
                 origin_input_ids=[1, 2],
                 output_ids=[9],
             )
 
+        req_pool = SimpleNamespace(
+            device=device,
+            max_context_len=16,
+            req_generation=torch.zeros(4, dtype=torch.long),
+        )
         trace = TraceReplayBatch.from_requests(
-            [req([9, 3, 5, 8]), req([9, 6, 7]), req(None)], device
+            [req(1, [9, 3, 5, 8]), req(2, [9, 6, 7]), req(3, None)], req_pool
         )
         candidates = torch.tensor(
             [[9, 2, 3, 4], [9, 6, 7, 8], [9, 8, 10, 11]], device=device

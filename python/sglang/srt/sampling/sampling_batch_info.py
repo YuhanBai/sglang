@@ -285,7 +285,7 @@ class SamplingBatchInfo:
             merged_custom_logit_processor = None
             custom_params = None
 
-        trace_replay = TraceReplayBatch.from_requests(reqs, device)
+        trace_replay = TraceReplayBatch.from_requests(reqs, batch.req_to_token_pool)
 
         # Each penalizers will do nothing if they evaluate themselves as not required by looking at
         # the sampling_params of the requests (See {_is_required()} of each penalizers). So this
