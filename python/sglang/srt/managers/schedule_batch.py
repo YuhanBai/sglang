@@ -3358,6 +3358,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             # Filter out all requests. Stale tensors are left as-is: is_empty()
             # keys off reqs, so callers drop the batch before a forward reads them.
             self.reqs = []
+            if self.sampling_info is not None:
+                self.sampling_info.trace_replay = None
             self.return_hidden_states = False
             self.return_hidden_states_mode = CaptureHiddenMode.NULL
             return

@@ -3518,10 +3518,16 @@ class Scheduler(
 
         if (
             req.sampling_params.trace_decode_token_ids is not None
-            and not self.spec_algorithm.is_none()
+            and self.spec_algorithm.is_speculative()
+            and (
+                not self.spec_algorithm.supports_trace_replay()
+                or self.disaggregation_mode != DisaggregationMode.NULL
+                or get_parallel().pp_size > 1
+            )
         ):
             error_msg = (
-                "trace_decode_token_ids is not supported with speculative decoding."
+                "trace_decode_token_ids supports speculative decoding with "
+                "EAGLE, EAGLE3 or STANDALONE on a non-disaggregated server with PP=1."
             )
             req.set_finish_with_abort(error_msg)
             self.init_req_max_new_tokens(req)
@@ -4965,6 +4971,15 @@ class Scheduler(
             self.is_mixed_chunk
             and not running_batch.is_empty()
             and not (new_batch.return_logprob or running_batch.return_logprob)
+            # The speculative cursor is derived from committed KV lengths in
+            # target verify. Keep those decode rows on the verify path.
+            and (
+                self.spec_algorithm.is_none()
+                or (
+                    new_batch.sampling_info.trace_replay is None
+                    and running_batch.sampling_info.trace_replay is None
+                )
+            )
             # mix_with_running cats input_ids but not input_embeds — shapes would mismatch
             and new_batch.input_embeds is None
             # Beam member rows are not supported inside a mixed extend batch.

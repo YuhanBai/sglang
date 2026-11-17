@@ -26,6 +26,7 @@ from sglang.srt.layers.logprob_processor import (
 from sglang.srt.runtime_context import get_exec, get_parallel, get_server_args
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_params import TOP_K_ALL
+from sglang.srt.sampling.trace_replay import capture_trace_logits
 from sglang.srt.utils.async_probe import maybe_detect_nan, sanitize_nan_logits
 from sglang.srt.utils.common import get_bool_env_var
 from sglang.srt.utils.device import (
@@ -92,33 +93,13 @@ def apply_trace_decode_tokens(
     sampling_info: SamplingBatchInfo,
 ) -> torch.Tensor:
     """Replace sampled IDs with the next IDs from each request's trace."""
-    trace_token_ids = sampling_info.trace_decode_token_ids
-    trace_token_lens = sampling_info.trace_decode_token_lens
-    trace_steps = sampling_info.trace_decode_steps
-    if (
-        trace_token_ids is None
-        or trace_token_lens is None
-        or trace_steps is None
-        or trace_token_ids.shape[1] == 0
-    ):
+    trace = sampling_info.trace_replay
+    if trace is None:
         return sampled_token_ids
-
-    original_shape = sampled_token_ids.shape
-    sampled_token_ids = sampled_token_ids.reshape(-1)
-    trace_step = trace_steps.to(torch.int64).reshape(-1)
-    should_replay = (trace_step >= 0) & (trace_step < trace_token_lens)
-
-    safe_trace_step = trace_step.clamp(min=0, max=trace_token_ids.shape[1] - 1)
-    forced_token_ids = torch.gather(
-        trace_token_ids,
-        dim=1,
-        index=safe_trace_step.to(torch.long).view(-1, 1),
-    ).view(-1)
+    tokens, rows = trace.lookup(trace.steps)
     return torch.where(
-        should_replay,
-        forced_token_ids.to(sampled_token_ids.dtype),
-        sampled_token_ids,
-    ).reshape(original_shape)
+        rows, tokens.to(sampled_token_ids.dtype), sampled_token_ids.reshape(-1)
+    ).reshape(sampled_token_ids.shape)
 
 
 def _trace_e2e_sampler(stage: str, **fields) -> None:
@@ -193,6 +174,7 @@ class Sampler(nn.Module):
         positions: torch.Tensor,
         *,
         logprob_logits: Optional[torch.Tensor] = None,
+        raw_trace_logits: Optional[torch.Tensor] = None,
     ):
         """Run a sampler & compute logprobs and update logits_output accordingly.
 
@@ -210,6 +192,10 @@ class Sampler(nn.Module):
             logprob_logits: Optional pre-watermark logits for returned log probabilities.
         """
         logits = logits_output.next_token_logits
+        if raw_trace_logits is None:
+            raw_trace_logits = capture_trace_logits(
+                logits, sampling_info, return_logprob
+            )
         maybe_detect_nan(logits, "sampler: next_token_logits")
         _trace_e2e_sampler(
             "forward_enter",
@@ -355,7 +341,7 @@ class Sampler(nn.Module):
         # Keep the natural logits/logprobs intact and only override the selected
         # IDs. This makes returned logprobs describe the model distribution for
         # the forced trace token.
-        if sampling_info.trace_decode_token_ids is not None:
+        if sampling_info.trace_replay is not None:
             batch_next_token_ids = apply_trace_decode_tokens(
                 batch_next_token_ids, sampling_info
             )
@@ -365,6 +351,12 @@ class Sampler(nn.Module):
                 logprobs = target_logprobs
             elif SGLANG_RETURN_ORIGINAL_LOGPROB:
                 logprobs = original_logprobs
+            if raw_trace_logits is not None:
+                sanitize_nan_logits(raw_trace_logits, "trace replay: raw logits")
+                raw_logprobs = torch.nn.functional.log_softmax(raw_trace_logits, dim=-1)
+                logprobs.index_copy_(
+                    0, sampling_info.trace_replay.rows, raw_logprobs.to(logprobs.dtype)
+                )
             logprob_result = self.output_logprob_processor.compute_logprobs(
                 logprobs,
                 top_logprobs_nums,

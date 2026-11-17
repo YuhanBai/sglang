@@ -231,6 +231,7 @@ from sglang.srt.runtime_context import (
 )
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_observer import SamplingObserver
+from sglang.srt.sampling.trace_replay import capture_trace_logits
 from sglang.srt.sampling.watermarking.core import WatermarkState
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.adaptive_spec_params import (
@@ -2236,6 +2237,11 @@ class ModelRunner:
         # runners may reuse backing objects. Never leak an auxiliary result from
         # a previous replay into a request with no observer state.
         logits_output.auxiliary_device_output = None
+        raw_trace_logits = capture_trace_logits(
+            logits_output.next_token_logits,
+            forward_batch.sampling_info,
+            forward_batch.return_logprob,
+        )
         observer = self.sampling_observer
         # Preserve two-argument overrides when observation is inactive.
         if observer is not None and observer.is_active(forward_batch.sampling_info):
@@ -2277,11 +2283,19 @@ class ModelRunner:
 
         # Sample the next tokens
         next_token_ids = None
-        if self.uocr_greedy_graph is not None:
+        if (
+            self.uocr_greedy_graph is not None
+            and forward_batch.sampling_info.trace_replay is None
+        ):
             next_token_ids = self.uocr_greedy_graph.recorded_ids(
                 logits_output, forward_batch, watermark_state=watermark_state
             )
         if next_token_ids is None:
+            sample_kwargs = {}
+            if logprob_logits is not None:
+                sample_kwargs["logprob_logits"] = logprob_logits
+            if raw_trace_logits is not None:
+                sample_kwargs["raw_trace_logits"] = raw_trace_logits
             next_token_ids = self.sampler(
                 logits_output,
                 forward_batch.sampling_info,
@@ -2294,11 +2308,7 @@ class ModelRunner:
                     if forward_batch.forward_mode.is_decode()
                     else forward_batch.seq_lens - 1
                 ),
-                **(
-                    {"logprob_logits": logprob_logits}
-                    if logprob_logits is not None
-                    else {}
-                ),
+                **sample_kwargs,
             )
         if observer_state is not None:
             logits_output.auxiliary_device_output = observer.after_sample(

@@ -143,6 +143,13 @@ class SpeculativeAlgorithm(Enum):
         # locations it computes before the target forward.
         return self.is_none() or self.is_dflash_family()
 
+    def supports_trace_replay(self) -> bool:
+        return self in (
+            SpeculativeAlgorithm.EAGLE,
+            SpeculativeAlgorithm.EAGLE3,
+            SpeculativeAlgorithm.STANDALONE,
+        )
+
     def supports_mixed_chunk(self) -> bool:
         """Whether mixed chunk prefill may stay enabled with this algorithm.
 

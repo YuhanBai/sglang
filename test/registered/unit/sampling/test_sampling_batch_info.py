@@ -1021,6 +1021,58 @@ class TestFromScheduleBatch(CustomTestCase):
 
         self.assertTrue(torch.equal(replayed, torch.tensor([8])))
 
+    def test_trace_payload_tracks_live_requests_and_respects_generation_cap(self):
+        long_req = self._make_req(trace=[7, 8, 9, 10])
+        long_req.sampling_params.max_new_tokens = 2
+        short_req = self._make_req(trace=[13])
+
+        def make_info(reqs):
+            return SamplingBatchInfo.from_schedule_batch(
+                MagicMock(reqs=reqs, device=DEVICE), VOCAB_SIZE
+            )
+
+        info = make_info([long_req, short_req])
+        snapshot = info.trace_replay
+        self.assertEqual(snapshot.tokens.tolist(), [7, 8, 13])
+        info.merge_batch(make_info([self._make_req()]))
+        self.assertIs(info.trace_replay.tokens, snapshot.tokens)
+
+        info.advance_trace_decode_steps()
+        info.filter_batch([0, 2], torch.tensor([0, 2]))
+        self.assertEqual(info.trace_replay.tokens.tolist(), [7, 8])
+        self.assertEqual(
+            apply_trace_decode_tokens(torch.tensor([30, 31]), info).tolist(), [8, 31]
+        )
+        self.assertEqual(snapshot.steps.tolist(), [0, 0])
+        self.assertEqual(snapshot.tokens.tolist(), [7, 8, 13])
+
+        info.filter_batch([1], torch.tensor([1]))
+        self.assertIsNone(info.trace_replay)
+        self.assertEqual(
+            apply_trace_decode_tokens(torch.tensor([31]), info).tolist(), [31]
+        )
+
+    def test_trace_merge_preserves_offsets_for_independent_payloads(self):
+        left = SamplingBatchInfo.from_schedule_batch(
+            MagicMock(
+                reqs=[self._make_req(), self._make_req(trace=[4, 5])], device=DEVICE
+            ),
+            VOCAB_SIZE,
+        )
+        right = SamplingBatchInfo.from_schedule_batch(
+            MagicMock(
+                reqs=[self._make_req(trace=[7]), self._make_req()], device=DEVICE
+            ),
+            VOCAB_SIZE,
+        )
+        left.advance_trace_decode_steps()
+        left.merge_batch(right)
+
+        self.assertEqual(
+            apply_trace_decode_tokens(torch.tensor([24, 25, 26, 27]), left).tolist(),
+            [24, 5, 7, 27],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

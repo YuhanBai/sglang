@@ -70,13 +70,33 @@ class TestTraceReplayValidation(CustomTestCase):
         )
 
     def test_basic_and_greedy(self):
+        trace = [1, 2, 3, 4]
+        baseline = None
         for temperature in [0, 0.8, 1.0]:
             with self.subTest(temperature=temperature):
-                trace = [1, 2, 3, 4]
                 result = self.generate(
                     f"basic_{temperature}", self.payload(trace, temperature=temperature)
                 )
                 self.assert_trace(result, trace)
+                scores = [
+                    item[0] for item in result["meta_info"]["output_token_logprobs"]
+                ]
+                if baseline is None:
+                    baseline = scores
+                for expected, actual in zip(baseline, scores, strict=True):
+                    self.assertAlmostEqual(expected, actual, delta=1e-5)
+
+    @unittest.skipUnless(
+        os.environ.get("TRACE_REPLAY_EXPECT_SPECULATIVE") == "1",
+        "requires a server started with EAGLE, EAGLE3 or STANDALONE",
+    )
+    def test_speculative_verify_replays_trace_and_reports_logprobs(self):
+        trace = [1, 2, 3, 4, 5, 6, 7, 8]
+        result = self.generate(
+            "speculative_replay", self.payload(trace, temperature=0.8)
+        )
+        self.assert_trace(result, trace)
+        self.assertGreater(result["meta_info"]["spec_verify_ct"], 0)
 
     def test_logprob_matches_teacher_forcing(self):
         """Forcing a token must preserve its model probability, including decode steps."""

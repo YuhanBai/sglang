@@ -785,6 +785,7 @@ def eagle_sample(
 
     bs = len(batch.seq_lens)
     sampling_info = batch.sampling_info
+    trace = getattr(sampling_info, "trace_replay", None)
     next_token_logits = logits_output.next_token_logits
     vocab_shard = logits_output.next_token_logits_vocab_shard
     if vocab_shard is not None and not _sharded_sampling_applies(
@@ -874,7 +875,14 @@ def eagle_sample(
     candidates = verify_input.draft_token.reshape(bs, verify_input.draft_token_num)
     predict_shape = list(next_token_logits.shape)[:-1]
     use_rejection_sampling = get_spec().speculative_use_rejection_sampling
-    greedy = _verify_uses_greedy(
+    trace_with_greedy_rows = trace is not None and (
+        trace.rows.numel() == bs
+        or all(
+            length or req.sampling_params.top_k <= 1
+            for (_, length), req in zip(trace.spans, batch.reqs, strict=True)
+        )
+    )
+    greedy = trace_with_greedy_rows or _verify_uses_greedy(
         is_all_greedy=sampling_info.is_all_greedy,
         is_cpu=_is_cpu,
         is_hip=_is_hip,
@@ -911,7 +919,7 @@ def eagle_sample(
             logits_output.next_token_logits = next_token_logits
             logits_output.next_token_logits_vocab_shard = vocab_shard = None
     # The generic fused chain acceptance writes every verify output itself.
-    chain = _chain_accept_applies(
+    chain = trace is None and _chain_accept_applies(
         verify_input=verify_input,
         logits=next_token_logits,
         simulated_acc_len=simulated_acc_len,
@@ -940,7 +948,19 @@ def eagle_sample(
             else sharded_predict
         )
         target_predict = target_predict.reshape(bs, verify_input.draft_token_num)
-        if fused_verify:
+        if trace is not None and SIMULATE_ACC_LEN <= 0:
+            predict, accept_index, num_correct_drafts = _verify_trace_replay(
+                trace,
+                batch.seq_lens,
+                verify_input,
+                candidates,
+                predict,
+                accept_index,
+                num_correct_drafts,
+                target_predict=target_predict,
+            )
+            trace = None
+        elif fused_verify:
             accept_lens, accept_index = _chain_accept(
                 predict=predict,
                 accept_index=accept_index,
@@ -1220,6 +1240,26 @@ def eagle_sample(
                 generator=simulated_acc_len_rng,
             )
 
+    if trace is not None:
+        predict, accept_index, num_correct_drafts = _verify_trace_replay(
+            trace,
+            batch.seq_lens,
+            verify_input,
+            candidates,
+            predict,
+            accept_index,
+            num_correct_drafts,
+        )
+        tp_group = (
+            get_parallel().attn_tp_group
+            if is_dp_attention_enabled()
+            else get_parallel().tp_group
+        )
+        if tp_group.world_size > 1:
+            tp_group.broadcast(predict, src=0)
+            tp_group.broadcast(accept_index, src=0)
+            tp_group.broadcast(num_correct_drafts, src=0)
+
     # `num_correct_drafts` stays drafts-only inside this function; the returned
     # tensor includes the trailing/bonus token via out-of-place +1 so the
     # name no longer flips semantics mid-function (naming doc C2).
@@ -1234,6 +1274,75 @@ def eagle_sample(
             accept_lens,
         )
     return predict, accept_lens, accept_index
+
+
+def _verify_trace_replay(
+    trace,
+    seq_lens,
+    verify_input,
+    candidates,
+    predict,
+    accept_index,
+    num_correct_drafts,
+    *,
+    target_predict=None,
+):
+    # The root is the last emitted token, already present in the output
+    # history but not yet in the target KV cache. Each node's logits score
+    # the next token after that node. Overlap supplies the committed KV lengths.
+    steps = seq_lens.to(torch.long) - trace.prompt_lengths + 1
+    remaining = trace.lengths - steps
+    replay_rows = (steps >= 0) & (remaining > 0)
+    depths = verify_input.positions.view_as(candidates) - seq_lens[:, None]
+    forced, valid = trace.lookup(steps[:, None] + depths)
+    # Invalid depth has no matching vocab ID and cannot extend the trace.
+    forced = torch.where(valid, forced, -1).long()
+    if target_predict is not None:
+        forced = torch.where(replay_rows[:, None], forced, target_predict)
+        trace_predict, trace_indices, trace_num_correct = (
+            predict,
+            accept_index,
+            num_correct_drafts,
+        )
+    else:
+        trace_predict = torch.zeros_like(predict)
+        trace_indices = torch.full_like(accept_index, -1)
+        trace_num_correct = torch.empty_like(num_correct_drafts)
+
+    trace_predict, trace_indices, trace_num_correct = verify_tree_greedy_func(
+        predicts=trace_predict,
+        accept_index=trace_indices,
+        accept_token_num=trace_num_correct,
+        candidates=candidates,
+        retrieve_index=verify_input.retrieve_index,
+        retrieve_next_token=verify_input.retrieve_next_token,
+        retrieve_next_sibling=verify_input.retrieve_next_sibling,
+        target_predict=forced,
+    )
+
+    # If the final trace token matches a draft, use it as the bonus instead
+    # of committing that draft and emitting an extra token beyond the trace.
+    trace_num_correct = torch.minimum(
+        trace_num_correct, (remaining - 1).clamp_min(0).to(trace_num_correct.dtype)
+    )
+    if target_predict is not None:
+        trace_num_correct = torch.where(
+            replay_rows, trace_num_correct, num_correct_drafts
+        )
+    columns = torch.arange(accept_index.shape[1], device=accept_index.device)
+    trace_indices = trace_indices.masked_fill(columns > trace_num_correct[:, None], -1)
+    if target_predict is not None:
+        return trace_predict, trace_indices, trace_num_correct
+    predict = torch.where(
+        replay_rows[:, None],
+        trace_predict.view_as(candidates),
+        predict.view_as(candidates),
+    ).reshape_as(predict)
+    return (
+        predict,
+        torch.where(replay_rows[:, None], trace_indices, accept_index),
+        torch.where(replay_rows, trace_num_correct, num_correct_drafts),
+    )
 
 
 def _chain_accept_applies(

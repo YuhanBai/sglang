@@ -27,6 +27,7 @@ from sglang.srt.environ import envs
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.model_executor.forward_mode import ForwardMode
 from sglang.srt.runtime_context import publish, reset_context
+from sglang.srt.sampling.trace_replay import TraceReplayBatch
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative import (
     eagle_post_verify_graphs,
@@ -541,6 +542,56 @@ class TestPostVerifyGraphs(CustomTestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "needs a GPU")
 class TestPostVerifyGraphsMatchEager(CustomTestCase):
+    def test_trace_verify_follows_matching_branch_and_caps_commit(self):
+        device = "cuda"
+
+        def req(trace):
+            return SimpleNamespace(
+                sampling_params=SimpleNamespace(
+                    trace_decode_token_ids=trace, max_new_tokens=None
+                ),
+                origin_input_ids=[1, 2],
+                output_ids=[9],
+            )
+
+        trace = TraceReplayBatch.from_requests(
+            [req([9, 3, 5, 8]), req([9, 6, 7]), req(None)], device
+        )
+        candidates = torch.tensor(
+            [[9, 2, 3, 4], [9, 6, 7, 8], [9, 8, 10, 11]], device=device
+        )
+        verify_input = SimpleNamespace(
+            positions=torch.tensor(
+                [[2, 3, 3, 4], [2, 3, 4, 5], [2, 3, 4, 5]], device=device
+            ).flatten(),
+            retrieve_index=torch.arange(12, device=device).view(3, 4),
+            retrieve_next_token=torch.tensor(
+                [[1, -1, 3, -1], [1, 2, 3, -1], [1, 2, 3, -1]], device=device
+            ),
+            retrieve_next_sibling=torch.tensor(
+                [[-1, 2, -1, -1], [-1, -1, -1, -1], [-1, -1, -1, -1]], device=device
+            ),
+            tree_topk=2,
+        )
+        target_predict = torch.tensor(
+            [[2, 1, 4, 1], [1, 1, 1, 1], [8, 10, 12, 14]], device=device
+        )
+        predict, accept_indices, num_correct_drafts = eagle_utils._verify_trace_replay(
+            trace,
+            torch.tensor([2, 2, 2], device=device),
+            verify_input,
+            candidates,
+            torch.zeros(12, dtype=torch.int32, device=device),
+            torch.full((3, 3), -1, dtype=torch.int32, device=device),
+            torch.empty(3, dtype=torch.int32, device=device),
+            target_predict=target_predict,
+        )
+        self.assertEqual(num_correct_drafts.tolist(), [1, 1, 2])
+        self.assertEqual(accept_indices.tolist(), [[0, 2, -1], [4, 5, -1], [8, 9, 10]])
+        self.assertEqual(
+            predict[[0, 2, 4, 5, 8, 9, 10]].tolist(), [3, 5, 6, 7, 8, 10, 12]
+        )
+
     def setUp(self):
         publish(ServerArgs(model_path="dummy"), role="test")
         self.addCleanup(reset_context)

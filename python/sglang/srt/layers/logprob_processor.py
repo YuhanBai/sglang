@@ -18,6 +18,7 @@ from sglang.srt.model_executor.runner_utils.pool import (
     graph_pool_borrow_largest_run,
 )
 from sglang.srt.runtime_context import get_exec
+from sglang.srt.utils.async_probe import sanitize_nan_logits
 from sglang.srt.utils.device import async_d2h, is_pin_memory_available
 
 if TYPE_CHECKING:
@@ -390,6 +391,7 @@ def compute_spec_logprobs(
     *,
     accept_index: Optional[torch.Tensor] = None,
     chain_stride: Optional[int] = None,
+    raw_trace_logits: Optional[torch.Tensor] = None,
 ):
     assert (accept_index is None) != (chain_stride is None), (
         "pass exactly one of accept_index / chain_stride"
@@ -424,6 +426,27 @@ def compute_spec_logprobs(
         )
         gathered_logprobs = torch.nn.functional.log_softmax(
             gathered_logits / temperatures, dim=-1
+        )
+    if raw_trace_logits is not None:
+        assert accept_index is not None
+        trace_rows = batch.sampling_info.trace_replay.rows
+        verify_width = raw_trace_logits.shape[1]
+        trace_slots = accept_index.index_select(0, trace_rows).long()
+        trace_slots = trace_slots.clamp_min(0) % verify_width
+        trace_row_indices = torch.arange(trace_rows.numel(), device=trace_rows.device)[
+            :, None
+        ]
+        trace_logits = raw_trace_logits[trace_row_indices, trace_slots]
+        sanitize_nan_logits(trace_logits, "trace replay: raw verify logits")
+        trace_logprobs = torch.nn.functional.log_softmax(trace_logits, dim=-1)
+        output_rows = (
+            trace_rows[:, None] * max_accept
+            + torch.arange(max_accept, device=trace_rows.device)
+        ).reshape(-1)
+        gathered_logprobs.index_copy_(
+            0,
+            output_rows,
+            trace_logprobs.flatten(0, 1).to(gathered_logprobs.dtype),
         )
     gathered_logprobs.clamp_(min=torch.finfo(gathered_logprobs.dtype).min)
 

@@ -24,6 +24,7 @@ from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_executor.forward_mode import CaptureHiddenMode, ForwardMode
 from sglang.srt.runtime_context import mamba_track_grid
+from sglang.srt.sampling.trace_replay import capture_trace_logits
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.eagle_utils import (
     build_tree_kernel_efficient,
@@ -889,7 +890,9 @@ def run_eagle_verify(
     # they skip the c128 cleanup below, so not for a KV pool that needs it.
     post = (
         None
-        if post_verify_graphs is None or clears_c128
+        if post_verify_graphs is None
+        or clears_c128
+        or batch.sampling_info.trace_replay is not None
         else post_verify_graphs.run(
             batch=batch,
             verify_input=verify_input,
@@ -940,9 +943,19 @@ def run_eagle_verify(
         )
 
     # Sample
+    raw_trace_logits = None
+    if batch.return_logprob and batch.sampling_info.trace_replay is not None:
+        raw_trace_logits = capture_trace_logits(
+            logits_output.next_token_logits.view(bs, verify_input.draft_token_num, -1),
+            batch.sampling_info,
+            return_logprob=True,
+        )
     maybe_detect_nan(logits_output.next_token_logits, "verify: target model logits")
     maybe_detect_inf(logits_output.next_token_logits, "verify: target model logits")
-    if envs.SGLANG_ENABLE_NV_MEGA_RUNTIME_OPTIMIZATION.get():
+    if (
+        envs.SGLANG_ENABLE_NV_MEGA_RUNTIME_OPTIMIZATION.get()
+        and batch.sampling_info.trace_replay is None
+    ):
         watermark_full_mask = (
             target_worker.model_runner.attn_backend.verify_mask is None
             or target_worker.model_runner.attn_backend.verify_mask.mode
@@ -1071,7 +1084,13 @@ def run_eagle_verify(
         bonus_tokens = torch.empty((0,), device=device, dtype=torch.int32)
 
     if batch.return_logprob and not batch.forward_mode.is_idle():
-        compute_spec_logprobs(batch, logits_output, predict, accept_index=accept_index)
+        compute_spec_logprobs(
+            batch,
+            logits_output,
+            predict,
+            accept_index=accept_index,
+            raw_trace_logits=raw_trace_logits,
+        )
 
     if finalize_tree_path and not batch.forward_mode.is_idle() and topk > 1:
         # topk == 1 needs nothing here: the accepted path is already the front
