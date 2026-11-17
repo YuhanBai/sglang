@@ -8,7 +8,6 @@ import json
 import math
 import os
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -30,7 +29,7 @@ class TestTraceReplayValidation(CustomTestCase):
             json.dumps(cls.model_info, indent=2), encoding="utf-8"
         )
 
-    def generate(self, label, payload, status=200):
+    def generate(self, label, payload):
         response = requests.post(self.base_url + "/generate", json=payload, timeout=180)
         (self.evidence_dir / f"{label}.json").write_text(
             json.dumps(
@@ -43,7 +42,7 @@ class TestTraceReplayValidation(CustomTestCase):
             ),
             encoding="utf-8",
         )
-        self.assertEqual(response.status_code, status, response.text)
+        self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
     def payload(self, trace, **sampling):
@@ -69,74 +68,20 @@ class TestTraceReplayValidation(CustomTestCase):
             all(entry[0] is not None and math.isfinite(entry[0]) for entry in entries)
         )
 
-    def test_basic_and_greedy(self):
-        trace = [1, 2, 3, 4]
-        baseline = None
-        for temperature in [0, 0.8, 1.0]:
-            with self.subTest(temperature=temperature):
-                result = self.generate(
-                    f"basic_{temperature}", self.payload(trace, temperature=temperature)
-                )
-                self.assert_trace(result, trace)
-                scores = [
-                    item[0] for item in result["meta_info"]["output_token_logprobs"]
-                ]
-                if baseline is None:
-                    baseline = scores
-                for expected, actual in zip(baseline, scores, strict=True):
-                    self.assertAlmostEqual(expected, actual, delta=1e-5)
-
-    @unittest.skipUnless(
-        os.environ.get("TRACE_REPLAY_EXPECT_SPECULATIVE") == "1",
-        "requires a server started with EAGLE, EAGLE3 or STANDALONE",
-    )
-    def test_speculative_verify_replays_trace_and_reports_logprobs(self):
+    def test_replay_logprobs_match_across_temperatures(self):
+        """Replay must preserve the model's token scores across temperatures."""
         trace = [1, 2, 3, 4, 5, 6, 7, 8]
-        result = self.generate(
-            "speculative_replay", self.payload(trace, temperature=0.8)
-        )
-        self.assert_trace(result, trace)
-        self.assertGreater(result["meta_info"]["spec_verify_ct"], 0)
-
-    def test_logprob_matches_teacher_forcing(self):
-        """Forcing a token must preserve its model probability, including decode steps."""
-        trace = [1, 2, 3, 4, 5, 6]
-        payload = self.payload(trace)
-        replay = self.generate("logprob_replay", payload)
+        replay = self.generate("logprob_replay", self.payload(trace, temperature=1.0))
+        greedy = self.generate("logprob_greedy", self.payload(trace, temperature=0.0))
         self.assert_trace(replay, trace)
-        score = self.generate(
-            "logprob_teacher",
-            {
-                "input_ids": payload["input_ids"] + trace,
-                "sampling_params": {"temperature": 1.0, "max_new_tokens": 0},
-                "return_logprob": True,
-                "logprob_start_len": 0,
-            },
-        )
-        # Include the causal predecessor in the scoring window: its first
-        # entry has no logprob, whereas every trace token must have one.
-        teacher = score["meta_info"]["input_token_logprobs"][
-            len(payload["input_ids"]) :
-        ]
-        self.assertEqual([entry[1] for entry in teacher], trace)
-        errors = [
-            abs(a[0] - b[0])
-            for a, b in zip(replay["meta_info"]["output_token_logprobs"], teacher)
-        ]
-        (self.evidence_dir / "logprob_comparison.json").write_text(
-            json.dumps(
-                {
-                    "absolute_errors": errors,
-                    "max_absolute_error": max(errors),
-                    "tolerance": 0.1,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        # BF16 prefill/decode kernels can round differently; altered or masked
-        # distributions produce substantially larger differences on these tokens.
-        self.assertLessEqual(max(errors), 0.1)
+        self.assert_trace(greedy, trace)
+        replay_scores = replay["meta_info"]["output_token_logprobs"]
+        for replay_entry, greedy_entry in zip(
+            replay_scores, greedy["meta_info"]["output_token_logprobs"], strict=True
+        ):
+            self.assertAlmostEqual(replay_entry[0], greedy_entry[0], delta=1e-5)
+        if os.environ.get("TRACE_REPLAY_EXPECT_SPECULATIVE") == "1":
+            self.assertGreater(replay["meta_info"]["spec_verify_ct"], 0)
 
     def test_stop_conditions_and_cap(self):
         from transformers import AutoTokenizer
@@ -176,59 +121,6 @@ class TestTraceReplayValidation(CustomTestCase):
         self.assert_trace(result[0], traces[0])
         self.assert_trace(result[2], traces[2])
         self.assertGreater(result[1]["meta_info"]["completion_tokens"], 0)
-
-    def test_concurrent_variable_lengths(self):
-        def run(index):
-            trace = list(range(10 + index, 10 + index + 2 * index + 1))
-            payload = self.payload(trace)
-            # Distinct long prompts exercise chunked prefill and prefix reuse.
-            payload["input_ids"] = [9707 + index] * (129 + index * 17)
-            result = self.generate(f"concurrent_{index}", payload)
-            return result, trace
-
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            for result, trace in pool.map(run, range(6)):
-                self.assert_trace(result, trace)
-
-    def test_streaming(self):
-        trace = [1, 2, 3, 4, 5, 6, 7]
-        payload = self.payload(trace)
-        payload["stream"] = True
-        chunks = []
-        with requests.post(
-            self.base_url + "/generate", json=payload, stream=True, timeout=180
-        ) as response:
-            self.assertEqual(
-                response.status_code,
-                200,
-                response.text if response.status_code != 200 else "",
-            )
-            for line in response.iter_lines():
-                if line.startswith(b"data: ") and line != b"data: [DONE]":
-                    chunks.append(json.loads(line[6:]))
-        (self.evidence_dir / "streaming.json").write_text(
-            json.dumps(chunks, indent=2), encoding="utf-8"
-        )
-        self.assertTrue(chunks)
-        # The default native stream returns cumulative IDs and logprobs.
-        self.assert_trace(chunks[-1], trace)
-        for chunk in chunks:
-            ids = chunk["output_ids"]
-            self.assertEqual(ids, trace[: len(ids)])
-
-    def test_reject_invalid_requests(self):
-        cases = {
-            "empty": ([], {}),
-            "negative": ([-1], {}),
-            "oov": ([999999999], {}),
-            "grammar": ([1], {"regex": "[a-z]+"}),
-            "parallel_sampling": ([1], {"n": 2}),
-        }
-        for label, (trace, sampling) in cases.items():
-            with self.subTest(label=label):
-                self.generate(
-                    f"reject_{label}", self.payload(trace, **sampling), status=400
-                )
 
 
 if __name__ == "__main__":

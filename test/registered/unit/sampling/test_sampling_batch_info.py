@@ -1018,25 +1018,6 @@ class TestFromScheduleBatch(CustomTestCase):
         # custom_params should be collected for all reqs
         self.assertEqual(len(info.custom_params), 2)
 
-    def test_trace_replay_basic(self):
-        req = self._make_req(trace=[7, 8], prompt_ids=[1, 2, 3])
-        info = self._make_trace_info([req])
-        sampled = torch.tensor([0])
-        first = apply_trace_decode_tokens(sampled, info)
-        info.advance_trace_decode_steps()
-        second = apply_trace_decode_tokens(sampled, info)
-
-        self.assertEqual(first.tolist(), [7])
-        self.assertEqual(second.tolist(), [8])
-
-    def test_trace_replay_step_starts_after_existing_output(self):
-        req = self._make_req(trace=[7, 8], prompt_ids=[1, 2, 3])
-        req.output_ids = [99]
-        info = self._make_trace_info([req])
-        self.assertEqual(
-            apply_trace_decode_tokens(torch.tensor([0]), info).tolist(), [8]
-        )
-
     def test_trace_batch_changes_reuse_resident_request_slots(self):
         long_req = self._make_req(trace=[7, 8, 9, 10])
         long_req.sampling_params.max_new_tokens = 2

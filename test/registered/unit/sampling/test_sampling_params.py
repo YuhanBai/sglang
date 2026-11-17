@@ -135,6 +135,23 @@ class TestSamplingParamsVerify(CustomTestCase):
             with self.assertRaisesRegex(ValueError, "n must be an integer >= 1"):
                 self._make(n=0).verify(self.VOCAB_SIZE)
 
+    def test_trace_replay_rejects_invalid_params(self):
+        cases = (
+            ([], {}, "must not be empty"),
+            ([-1], {}, "non-negative integers"),
+            ([self.VOCAB_SIZE], {}, "out-of-vocabulary"),
+            ([1], {"regex": "[a-z]+"}, "structured outputs"),
+            ([1], {"n": 2}, "only supported when n=1"),
+        )
+        for trace, kwargs, error in cases:
+            with (
+                self.subTest(trace=trace, kwargs=kwargs),
+                self.assertRaisesRegex(ValueError, error),
+            ):
+                self._make(trace_decode_token_ids=trace, **kwargs).verify(
+                    self.VOCAB_SIZE
+                )
+
     def test_request_reasoning_end_token_ids_are_vocab_bounded_integers(self):
         self._make(
             custom_params={REQUEST_REASONING_END_TOKEN_IDS_KEY: [17, 18]}
