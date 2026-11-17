@@ -96,10 +96,7 @@ def apply_trace_decode_tokens(
     trace = sampling_info.trace_replay
     if trace is None:
         return sampled_token_ids
-    tokens, rows = trace.lookup(trace.steps)
-    return torch.where(
-        rows, tokens.to(sampled_token_ids.dtype), sampled_token_ids.reshape(-1)
-    ).reshape(sampled_token_ids.shape)
+    return trace.apply(sampled_token_ids)
 
 
 def _trace_e2e_sampler(stage: str, **fields) -> None:

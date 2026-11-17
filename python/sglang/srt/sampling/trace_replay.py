@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 
+from sglang.kernels.ops.sampling import trace_replay as trace_replay_op
 from sglang.srt.utils.device import async_h2d, is_pin_memory_available
 
 
@@ -219,12 +220,14 @@ class TraceReplayBatch:
 
     def lookup(self, steps):
         """Read one or more trace steps per batch row."""
-        tokens = self.pool.prepare(self)
-        slots, lengths = self.indices, self.lengths
-        if steps.ndim == 2:
-            slots, lengths = slots[:, None], lengths[:, None]
-        valid = (steps >= 0) & (steps < lengths)
-        return tokens[slots, torch.where(valid, steps, 0)], valid
+        return trace_replay_op(
+            self.pool.prepare(self), self.indices, self.lengths, steps
+        )
+
+    def apply(self, sampled):
+        return trace_replay_op(
+            self.pool.prepare(self), self.indices, self.lengths, self.steps, sampled
+        )
 
 
 def capture_trace_logits(logits, sampling_info, return_logprob):
