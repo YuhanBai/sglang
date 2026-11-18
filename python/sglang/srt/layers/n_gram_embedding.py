@@ -24,6 +24,7 @@ class NgramEmbedding(torch.nn.Module):
         over_embedding_k: int,
         over_embedding_n: int,
         eos_token_id: int,
+        ignored_token_ids=(),
     ):
         super().__init__()
         assert over_embedding_n > 1, (
@@ -35,6 +36,11 @@ class NgramEmbedding(torch.nn.Module):
         self.over_embedding_k = over_embedding_k
         self.over_embedding_n = over_embedding_n
         self.eos_token_id = eos_token_id
+        ignore_mask = None
+        if ignored_token_ids:
+            ignore_mask = torch.zeros(num_embeddings, dtype=torch.bool)
+            ignore_mask[list(ignored_token_ids)] = True
+        self.register_buffer("oe_ignore_mask", ignore_mask, persistent=False)
 
         use_attn_tp_group = is_dp_attention_enabled()
         self.word_embeder = VocabParallelEmbedding(
@@ -97,6 +103,11 @@ class NgramEmbedding(torch.nn.Module):
         self.exclusive_req_len_sums = torch.zeros(
             max_running_requests + 1, dtype=torch.int32, device=device
         )
+        if self.oe_ignore_mask is not None:
+            self.oe_ignore_mask = self.oe_ignore_mask.to(device)
+        if _is_npu:
+            self.oe_weights = self.oe_weights.to(device)
+            self.oe_mods = self.oe_mods.to(device)
 
     def load_weight(
         self, param: Parameter, weight_name: str, loaded_weight: torch.Tensor
@@ -134,7 +145,10 @@ class NgramEmbedding(torch.nn.Module):
                     ".weight", ""
                 )
             )
-            self.oe_projection[index].copy_(loaded_weight.data.t())
+            projection = loaded_weight.t()
+            if self.oe_ignore_mask is not None:
+                projection = projection / (self.n_grams + 1)
+            self.oe_projection[index].copy_(projection)
         else:
             assert False, f"Unknown ngram embedding weight name: {weight_name}"
 
@@ -154,6 +168,24 @@ class NgramEmbedding(torch.nn.Module):
         requests.clamp_max_(batch_size - 1)
         positions = forward_batch.positions
         rows = forward_batch.req_pool_indices[requests]
+        from sglang.srt.hardware_backend.npu.utils import is_npu_arch35
+
+        if is_npu_arch35():
+            from sglang.srt.hardware_backend.npu.longcat_oe import compute_ngram_ids
+
+            compute_ngram_ids(
+                info.token_table,
+                positions,
+                rows,
+                valid,
+                self.oe_weights,
+                self.oe_mods,
+                self.exclusive_oe_embedder_size_sums,
+                self.eos_token_id,
+                output,
+            )
+            return
+
         lookback = torch.arange(1 - self.over_embedding_n, 1, device=input_ids.device)
         # The native op stops at negative tokens but has no EOS boundary check.
         # Match the GPU rule with a separate N-token history for each query:
@@ -236,16 +268,21 @@ class NgramEmbedding(torch.nn.Module):
                     eos_token_id=self.eos_token_id,
                 )
 
-        # [13, seq_len, hidden_dim]
+        word = self.word_embeder(input_ids)
+        oe_hidden_states = self.oe_embeder(
+            self.oe_n_gram_ids[: len(input_ids)].permute(1, 0).contiguous()
+        )
+        if self.oe_ignore_mask is not None:
+            combined = word / (self.n_grams + 1) + torch.bmm(
+                oe_hidden_states, self.oe_projection
+            ).sum(dim=0)
+            return torch.where(self.oe_ignore_mask[input_ids, None], word, combined)
+
         all_hidden_states = torch.empty(
             [self.n_grams + 1, len(input_ids), self.embedding_dim],
             dtype=self.oe_projection.dtype,
             device=input_ids.device,
         )
-        all_hidden_states[0] = self.word_embeder(input_ids)
-        # oe_hidden_states: [12, seq_len, hidden_dim / 12]
-        oe_hidden_states = self.oe_embeder(
-            self.oe_n_gram_ids[: len(input_ids)].permute(1, 0).contiguous()
-        )
+        all_hidden_states[0] = word
         torch.bmm(oe_hidden_states, self.oe_projection, out=all_hidden_states[1:])
         return all_hidden_states.mean(dim=0)

@@ -234,6 +234,25 @@ class DSANPUIndexerMixin:
                 device=query.device,
             )
 
+        from sglang.srt.hardware_backend.npu.utils import is_npu_arch35
+
+        if is_npu_arch35():
+            from sglang.srt.hardware_backend.npu.longcat_indexer import (
+                lightning_indexer,
+            )
+
+            return lightning_indexer(
+                query,
+                key,
+                weights,
+                actual_seq_lengths_q,
+                actual_seq_lengths_kv,
+                block_table,
+                self.index_topk,
+                self.num_init_tokens,
+                self.num_local_tokens,
+            )
+
         # Unlike torch_npu's indexer, the LSA operator takes leading-zero
         # INT64 cumulative lengths for BOTH Q and KV. KV includes cached tokens.
         q_ends = actual_seq_lengths_q.to(device=query.device, dtype=torch.int64)

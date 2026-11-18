@@ -25,6 +25,8 @@ _is_npu = is_npu()
 
 if _is_npu:
     import sgl_kernel_npu  # noqa: F401  Registers torch.ops.npu OE operators.
+
+    from sglang.srt.hardware_backend.npu.utils import is_npu_arch35
 else:
     from sglang.kernels.ops.embeddings.ngram_embedding import update_token_table
 
@@ -38,6 +40,15 @@ if TYPE_CHECKING:
 def _update_token_table(tokens, ne_token_table, row_indices, column_starts, req_lens):
     if _is_npu:
         if row_indices.numel() == 0 or tokens.numel() == 0:
+            return
+        if is_npu_arch35():
+            from sglang.srt.hardware_backend.npu.longcat_oe import (
+                update_token_table as update_a5_token_table,
+            )
+
+            update_a5_token_table(
+                tokens, ne_token_table, row_indices, column_starts, req_lens
+            )
             return
         torch.ops.npu.update_oe_token_table(
             tokens.contiguous(),

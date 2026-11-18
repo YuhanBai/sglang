@@ -59,6 +59,7 @@ class LongcatFlashConfig(PretrainedConfig):
         oe_vocab_size_ratio=None,
         oe_neighbor_num=None,
         oe_split_num=None,
+        oe_ignore_tokens=None,
         **kwargs,
     ):
         super().__init__(
@@ -117,8 +118,20 @@ class LongcatFlashConfig(PretrainedConfig):
         self.oe_vocab_size_ratio = oe_vocab_size_ratio
         self.oe_neighbor_num = oe_neighbor_num
         self.oe_split_num = oe_split_num
+        self.oe_ignore_tokens = oe_ignore_tokens
         self.use_ngram_embedding = ngram_vocab_size_ratio is not None
         if self.use_ngram_embedding:
             self.ngram_embedding_m = int(ngram_vocab_size_ratio * vocab_size)
             self.ngram_embedding_n = emb_neighbor_num
             self.ngram_embedding_k = emb_split_num
+
+    @property
+    def oe_ignored_token_ids(self):
+        ids = set()
+        for item in (self.oe_ignore_tokens or "").split(","):
+            start, separator, end = item.strip().partition(":")
+            if start:
+                ids.update(range(int(start), int(end)) if separator else (int(start),))
+        if any(token < 0 or token >= self.vocab_size for token in ids):
+            raise ValueError("oe_ignore_tokens contains an ID outside the vocabulary")
+        return sorted(ids)

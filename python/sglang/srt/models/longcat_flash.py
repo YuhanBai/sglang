@@ -592,6 +592,7 @@ class LongcatFlashModel(nn.Module):
                 over_embedding_k=config.ngram_embedding_k,
                 over_embedding_n=config.ngram_embedding_n,
                 eos_token_id=config.eos_token_id,
+                ignored_token_ids=getattr(config, "oe_ignored_token_ids", ()),
             )
         else:
             self.use_ngram_embedding = False
@@ -976,6 +977,10 @@ class LongcatFlashForCausalLM(nn.Module):
                 use_async_loading = should_async_load(loaded_weight)
                 if "mtp" in name:
                     continue
+                if name.removeprefix("model.").startswith(
+                    ("visual_model.", "visual_bridge_model.")
+                ):
+                    continue  # This entry point loads only the language model.
                 if self.use_ngram_embedding:
                     # Original LongCat-2.0 checkpoints number OE branches from zero.
                     name = re.sub(
