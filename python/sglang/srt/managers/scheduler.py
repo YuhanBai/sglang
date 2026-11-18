@@ -975,6 +975,7 @@ class Scheduler(
                     image_processor_backend=get_mm().image_processor_backend,
                     tokenizer_backend=get_serving().tokenizer_backend,
                     model_name=get_model().model_path,
+                    hf_config=self.model_config.hf_config,
                 )
                 self.tokenizer = get_tokenizer_from_processor(self.processor)
             else:

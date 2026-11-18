@@ -8,6 +8,7 @@ _RSV_ARCHITECTURES = {
     "BailingMoELinearForCausalLM",
     "BailingMoeV2_5ForCausalLM",
     "LongcatFlashForCausalLM",
+    "Longcat25ForConditionalGeneration",
     "LongcatFlashForCausalLMNextN",
     "Step3VLForConditionalGeneration",
 }

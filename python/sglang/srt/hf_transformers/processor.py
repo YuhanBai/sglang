@@ -279,6 +279,7 @@ def _get_processor(
     image_processor_backend: Optional[str] = None,
     tokenizer_backend: str = "huggingface",
     model_name: Optional[str] = None,
+    hf_config=None,
     **kwargs,
 ):
     if tokenizer_backend == "fastokens":
@@ -293,6 +294,19 @@ def _get_processor(
     tokenizer_name = resolve_runai_obj_uri(tokenizer_name)
     if model_name is not None:
         model_name = resolve_runai_obj_uri(model_name)
+
+    if "Longcat25ForConditionalGeneration" in (
+        getattr(hf_config, "architectures", None) or ()
+    ):
+        return get_tokenizer(
+            tokenizer_name,
+            *args,
+            tokenizer_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            tokenizer_backend=tokenizer_backend,
+            **kwargs,
+        )
 
     if is_mistral_model(tokenizer_name):
         config = load_mistral_config(

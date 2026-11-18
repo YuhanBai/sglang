@@ -166,9 +166,8 @@ def _try_load_longcat_config(model, revision: Optional[str], **kwargs):
     if not any(arch in _LONGCAT_ARCHS for arch in architectures):
         return None
 
-    return _CONFIG_REGISTRY["longcat_flash"].from_pretrained(
-        model, revision=revision, **kwargs
-    )
+    config_dict["model_type"] = "longcat_flash"
+    return _CONFIG_REGISTRY["longcat_flash"].from_dict(config_dict, **kwargs)
 
 
 def _try_load_raw_mamba_config(model, revision: Optional[str], **kwargs):
@@ -295,14 +294,20 @@ class HfModelConfigParser(ModelConfigParserBase):
             model_type = config.model_type
             if model_type == "deepseek_vl_v2" and is_ocr:
                 model_type = "deepseek-ocr"
-            # Raw state-spaces Mamba configs are built by
-            # _try_load_raw_mamba_config with architectures injected; reloading
-            # from the checkpoint would drop them, so skip it when the config is
-            # already one of our classes.
+            # The early Mamba and LongCat loaders normalize checkpoint metadata.
+            # Keep that metadata instead of reloading the raw config.
             from sglang.srt.configs.mamba import FalconMambaConfig, MambaConfig
             from sglang.srt.configs.mamba2 import Mamba2Config
 
-            if not isinstance(config, (Mamba2Config, MambaConfig, FalconMambaConfig)):
+            if not isinstance(
+                config,
+                (
+                    Mamba2Config,
+                    MambaConfig,
+                    FalconMambaConfig,
+                    _CONFIG_REGISTRY["longcat_flash"],
+                ),
+            ):
                 config = _CONFIG_REGISTRY[model_type].from_pretrained(
                     model, revision=revision
                 )
@@ -325,7 +330,19 @@ class HfModelConfigParser(ModelConfigParserBase):
             _apply_gemma4_attention_overrides(config)
 
         if config.model_type == "longcat_flash":
-            _set_architectures(config, "LongcatFlashForCausalLM")
+            visual = getattr(config, "visual_config", None) or {}
+            quantizer = getattr(config, "visual_quantizer_config", None) or {}
+            if (
+                isinstance(visual, dict)
+                and visual.get("enable")
+                and isinstance(quantizer, dict)
+                and quantizer.get("enable")
+                and not getattr(config, "language_model_only", False)
+            ):
+                _set_architectures(config, "Longcat25ForConditionalGeneration")
+                config.image_token_id = visual["image_pad_token_id"]
+            else:
+                _set_architectures(config, "LongcatFlashForCausalLM")
 
         return config
 

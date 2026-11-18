@@ -773,6 +773,7 @@ def prepare_mm_inputs(
     placeholder_tokens: Optional[dict[Modality, List[int]]] = None,
     use_deepstack: Dict[Modality, bool] = {},
     feature_dtypes: Optional[Dict[Modality, torch.dtype]] = None,
+    input_embedding=None,
 ) -> Optional[torch.Tensor]:
     """Prepare full-sequence embeddings without running the language model.
 
@@ -780,9 +781,14 @@ def prepare_mm_inputs(
     Additional language-model inputs, such as DeepStack features, update kwargs.
     Non-first pipeline ranks consume proxy tensors and return no embeddings;
     they still write the placeholder token ids into input_ids.
+    A custom input_embedding can bind model-specific batch metadata.
     """
     assert hasattr(language_model, "get_input_embeddings")
-    embed_tokens = language_model.get_input_embeddings()
+    embed_tokens = (
+        language_model.get_input_embeddings()
+        if input_embedding is None
+        else input_embedding
+    )
     is_mm_extend = (
         not forward_batch.forward_mode.is_decode()
         and not forward_batch.forward_mode.is_target_verify()

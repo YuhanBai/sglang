@@ -54,6 +54,7 @@ def _dsa_dcp_overrides(cfg: Any) -> dict:
     "HYV4ForCausalLM",
     "HYV4ForCausalLMNextN",
     "LongcatFlashForCausalLM",
+    "Longcat25ForConditionalGeneration",
     "LongcatFlashForCausalLMNextN",
     "Dots3NoteForCausalLM",
     "Xing4_0ForCausalLM",

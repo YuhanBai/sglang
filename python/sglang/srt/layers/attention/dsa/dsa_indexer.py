@@ -429,7 +429,11 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                     if _is_npu
                     and config is not None
                     and config.architectures[0]
-                    in ("LongcatFlashForCausalLM", "LongcatFlashForCausalLMNextN")
+                    in (
+                        "LongcatFlashForCausalLM",
+                        "Longcat25ForConditionalGeneration",
+                        "LongcatFlashForCausalLMNextN",
+                    )
                     else torch.bfloat16
                 ),
                 prefix=add_prefix("weights_proj", prefix),

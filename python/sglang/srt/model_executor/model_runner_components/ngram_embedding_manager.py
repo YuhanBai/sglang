@@ -218,17 +218,24 @@ class NgramEmbeddingManager:
                 batch.reqs, batch.prefix_lens, batch.extend_lens, strict=True
             ):
                 end = start + extend_len
-                fill_ids = req.origin_input_ids + req.output_ids
-                if start == 0:
-                    tokens = fill_ids[start:end]
-                    column_starts.append(0)
-                elif start < self.n:
-                    tokens = fill_ids[0:end]
-                    column_starts.append(0)
-                else:
-                    # Prepend n-1 tokens before prefix_len for n-gram context
-                    tokens = fill_ids[start - self.n + 1 : end]
-                    column_starts.append(start - self.n + 1)
+                # Prepend the n-1 predecessors, including after a radix hit.
+                begin = max(0, start - self.n + 1)
+                tokens = (req.origin_input_ids + req.output_ids)[begin:end]
+                # KV/cache uses hashed media IDs. OE requires the checkpoint's
+                # real placeholder IDs, including in the cached predecessors.
+                if req.multimodal_inputs is not None:
+                    from sglang.srt.managers.mm_utils import _mm_placeholder_token_id
+
+                    for item in req.multimodal_inputs.mm_items:
+                        token_id = _mm_placeholder_token_id(
+                            req.multimodal_inputs, item.modality
+                        )
+                        for lo, hi in item.offsets or ():
+                            lo, hi = max(lo, begin), min(hi + 1, end)
+                            if lo < hi and token_id is not None:
+                                for offset in range(lo - begin, hi - begin):
+                                    tokens[offset] = token_id
+                column_starts.append(begin)
                 all_tokens.extend(tokens)
                 request_lengths.append(len(tokens))
             dtype = self.table.dtype

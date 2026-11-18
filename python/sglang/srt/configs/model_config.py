@@ -210,6 +210,7 @@ def is_deepseek_dsa(config) -> bool:
             "Glm5NextForConditionalGenerationNextN",
             "Glm5NextForConditionalGeneration",
             "LongcatFlashForCausalLM",
+            "Longcat25ForConditionalGeneration",
             "LongcatFlashForCausalLMNextN",
             "Xing4_0ForCausalLM",
             "Dots3NoteForCausalLM",
@@ -970,7 +971,10 @@ class ModelConfig:
             self.is_multimodal
             and getattr(self.hf_config, "vision_config", None) is not None
         )
-        if self.is_multimodal and has_dsv41_vision:
+        if self.is_multimodal and (
+            has_dsv41_vision
+            or "Longcat25ForConditionalGeneration" in self.hf_config.architectures
+        ):
             self.is_image_understandable_model = True
 
         # Models expose audio_config at different nesting levels:
@@ -1546,6 +1550,7 @@ class ModelConfig:
             or "Glm5NextForConditionalGeneration" in self.hf_config.architectures
             or "Glm5NextForConditionalGenerationNextN" in self.hf_config.architectures
             or "LongcatFlashForCausalLM" in self.hf_config.architectures
+            or "Longcat25ForConditionalGeneration" in self.hf_config.architectures
             or "LongcatFlashForCausalLMNextN" in self.hf_config.architectures
             or "HYV4ForCausalLM" in self.hf_config.architectures
             or "HYV4ForCausalLMNextN" in self.hf_config.architectures
@@ -1769,7 +1774,10 @@ class ModelConfig:
                 self.hc_hidden_size = self.hidden_size * hc_mult
         self.num_hidden_layers = self.hf_text_config.num_hidden_layers
         self.num_attention_layers = self.num_hidden_layers
-        if "LongcatFlashForCausalLM" in self.hf_config.architectures:
+        if any(
+            arch in self.hf_config.architectures
+            for arch in ("LongcatFlashForCausalLM", "Longcat25ForConditionalGeneration")
+        ):
             self.num_attention_layers = self.num_hidden_layers * 2
         if "IQuestLoopCoderForCausalLM" in self.hf_config.architectures:
             loop_num = getattr(self.hf_text_config, "loop_num", 1)
@@ -2583,6 +2591,7 @@ def is_generation_model(model_architectures: List[str], is_embedding: bool = Fal
 
 
 multimodal_model_archs = [
+    "Longcat25ForConditionalGeneration",
     "CLIPModel",
     "Cohere2VisionForConditionalGeneration",
     "Cosmos3EdgeForConditionalGeneration",

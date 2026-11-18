@@ -727,7 +727,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             register_token_space_models()
             if mm_process_pkg := envs.SGLANG_EXTERNAL_MM_PROCESSOR_PACKAGE.get():
                 import_processors(mm_process_pkg, overwrite=True)
-            _processor = get_processor_wrapper()
+            _processor = get_processor_wrapper(self.model_config.hf_config)
             transport_mode = determine_tensor_transport_mode()
 
             # We want to parallelize the image pre-processing so we create an executor for it
@@ -4333,7 +4333,7 @@ async def print_exception_wrapper(func):
         sys.exit(1)
 
 
-def get_processor_wrapper():
+def get_processor_wrapper(hf_config=None):
     return get_processor(
         get_serving().tokenizer_path,
         tokenizer_mode=get_serving().tokenizer_mode,
@@ -4342,6 +4342,7 @@ def get_processor_wrapper():
         image_processor_backend=get_mm().image_processor_backend,
         tokenizer_backend=get_serving().tokenizer_backend,
         model_name=get_model().model_path,
+        hf_config=hf_config,
     )
 
 

@@ -888,6 +888,7 @@ _DEEPSEEK_FAMILY_ARCHS = frozenset(
         "HYV4ForCausalLM",
         "HYV4ForCausalLMNextN",
         "LongcatFlashForCausalLM",
+        "Longcat25ForConditionalGeneration",
         "LongcatFlashForCausalLMNextN",
         "Dots3NoteForCausalLM",
         "Xing4_0ForCausalLM",
@@ -948,7 +949,7 @@ def _deepseek_moe_quant_resolution(view: Any) -> dict:
             and view.moe_runner_backend == "auto"
             # LongCat top-k spans the zero-expert logits, which trtllm-gen's
             # fused routing cannot see.
-            and not model_arch.startswith("LongcatFlash")
+            and not model_arch.startswith(("LongcatFlash", "Longcat25"))
             and (
                 quantization
                 in ["fp8", "modelopt_fp8", "modelopt_fp4", "modelopt_mixed"]
@@ -966,7 +967,12 @@ def _deepseek_moe_quant_resolution(view: Any) -> dict:
                     "Use flashinfer_trtllm as MoE runner backend on sm100 for DeepseekV3ForCausalLM"
                 )
         if (
-            model_arch in ["LongcatFlashForCausalLM", "LongcatFlashForCausalLMNextN"]
+            model_arch
+            in [
+                "LongcatFlashForCausalLM",
+                "Longcat25ForConditionalGeneration",
+                "LongcatFlashForCausalLMNextN",
+            ]
             and view.fp8_gemm_runner_backend == "auto"
             and quantization in ["fp8", "modelopt_fp8"]
             and quant_cfg.get("scale_fmt", None) != "ue8m0"

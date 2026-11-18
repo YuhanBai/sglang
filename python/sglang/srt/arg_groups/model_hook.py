@@ -282,6 +282,7 @@ def handle_model_specific_adjustments(server_args: Any):
         "HYV4ForCausalLM",
         "HYV4ForCausalLMNextN",
         "LongcatFlashForCausalLM",
+        "Longcat25ForConditionalGeneration",
         "Dots3NoteForCausalLM",
         "Xing4_0ForCausalLM",
         "KimiK31ForConditionalGeneration",

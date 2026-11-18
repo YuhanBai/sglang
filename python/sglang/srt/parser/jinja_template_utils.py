@@ -220,6 +220,7 @@ def process_content_for_template_format(
     audio_data: list,
     modalities: list,
     use_dpsk_v32_encoding: bool = False,
+    use_media_url_parts: bool = False,
 ) -> dict:
     """
     Process message content based on detected template format.
@@ -232,6 +233,8 @@ def process_content_for_template_format(
         audio_data: List to append extracted audio URLs
         modalities: List to append modalities
         use_dpsk_v32_encoding: If True, extract multimodal data and convert content to string (for DeepSeek-V3.2 encoding)
+        use_media_url_parts: Keep URL-shaped parts with empty URLs for templates
+            that render their media markers from those parts.
 
     Returns:
         Processed message dictionary
@@ -268,7 +271,11 @@ def process_content_for_template_format(
                     if chunk.get("modalities"):
                         modalities.append(chunk.get("modalities"))
                     # Normalize to simple 'image' type for template compatibility
-                    processed_content_parts.append({"type": "image"})
+                    processed_content_parts.append(
+                        {"type": "image_url", "image_url": {"url": ""}}
+                        if use_media_url_parts
+                        else {"type": "image"}
+                    )
                 elif chunk_type == "video_url":
                     video_obj = chunk.get("video_url") or {}
                     mdp = video_obj.get("max_dynamic_patch", None)
@@ -295,7 +302,11 @@ def process_content_for_template_format(
                     if chunk.get("modalities"):
                         modalities.append(chunk.get("modalities"))
                     # Normalize to simple 'video' type for template compatibility
-                    processed_content_parts.append({"type": "video"})
+                    processed_content_parts.append(
+                        {"type": "video_url", "video_url": {"url": ""}}
+                        if use_media_url_parts
+                        else {"type": "video"}
+                    )
                 elif chunk_type == "audio_url":
                     audio_data.append(chunk["audio_url"]["url"])
                     # Normalize to simple 'audio' type

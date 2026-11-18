@@ -1977,6 +1977,12 @@ class OpenAIServingChat(OpenAIServingBase):
         modalities = []
 
         template_content_format = self.template_manager.jinja_template_content_format
+        longcat_media_parts = is_multimodal and (
+            "Longcat25ForConditionalGeneration"
+            in self.tokenizer_manager.model_config.hf_config.architectures
+        )
+        if longcat_media_parts:
+            template_content_format = "openai"
 
         # Try custom encoding first (override in subclass for custom renderers)
         thinking_mode = (
@@ -2093,6 +2099,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     video_data,
                     audio_data,
                     modalities,
+                    use_media_url_parts=longcat_media_parts,
                 )
 
                 processed_msg["content"] = normalize_tool_content(
